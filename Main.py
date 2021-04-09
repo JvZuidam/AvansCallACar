@@ -1,12 +1,16 @@
 import telegram
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Updater, ConversationHandler, CallbackQueryHandler
+from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from telegram.ext import Updater, ConversationHandler, CallbackContext, Filters, MessageHandler, \
+    CommandHandler, CallbackQueryHandler
+
 from datetime import date, timedelta
 
 import DbHandler
+import telegramcalendar
 from Config import *
 
-TYPING_REPLY, CHOOSING, TYPING_CHOICE = range(3)
+CAR, DATE, DATE_SELECT, TIME, ADDRESS_FROM, ADDRESS_TO, FINISH, = range(7)
+NAME, PHONE_NUMBER = range(2)
 
 bot = telegram.Bot(telegram_bot_token)
 
@@ -17,28 +21,30 @@ def main():
 
     dp = updater.dispatcher
 
-    dp.add_handler(CallbackQueryHandler(menu_handler))
+    dp.add_handler(CommandHandler("help", help))
+    dp.add_handler(CommandHandler("cdb", check_and_or_create_db))
+    dp.add_handler(CommandHandler("finish", res_finish))
+    dp.add_handler(CommandHandler("reservations", get_reservation))
 
-    dp.add_handler(telegram.ext.CommandHandler("help", help))
-    dp.add_handler(telegram.ext.CommandHandler("cdb", check_and_or_create_db))
-    # dp.add_handler(telegram.ext.CommandHandler('reserve', reserve_car))
-
-    conv_res_handler = telegram.ext.ConversationHandler(
-        entry_points=[telegram.ext.CommandHandler("reserve", reserve_car)],
-        states={TYPING_REPLY: [telegram.ext.MessageHandler(telegram.ext.Filters.text, reservation_time)],
-                TYPING_CHOICE: [telegram.ext.MessageHandler(telegram.ext.Filters.text, reservation_place)]},
-        fallbacks=[telegram.ext.MessageHandler(telegram.ext.Filters.regex('^Done$'), done)]
+    conv_res_handler = ConversationHandler(
+        entry_points=[CommandHandler("reserve", reserve_car)],
+        states={CAR: [MessageHandler(Filters.regex('^(Normal cars|Special needs cars)$'), res_car_select)],
+                ADDRESS_FROM: [MessageHandler(Filters.text, res_address_from_select)],
+                ADDRESS_TO: [MessageHandler(Filters.text, res_address_to_select)],
+                TIME: [MessageHandler(Filters.text, res_time_select)],
+                DATE: [MessageHandler(Filters.text, res_date_select)],
+                DATE_SELECT: [CallbackQueryHandler(inline_handler)]},
+        fallbacks=[MessageHandler(Filters.regex('^Done$'), done)]
     )
 
-    conv_register_handler = telegram.ext.ConversationHandler(
-        entry_points=[telegram.ext.CommandHandler("register", register)],
-        states={TYPING_REPLY: [telegram.ext.MessageHandler(telegram.ext.Filters.text, user_register)]},
-        fallbacks=[telegram.ext.MessageHandler(telegram.ext.Filters.regex('^Done$'), done)]
+    conv_register_handler = ConversationHandler(
+        entry_points=[CommandHandler("register", register)],
+        states={PHONE_NUMBER: [MessageHandler(Filters.text, register_phonenumber)]},
+        fallbacks=[MessageHandler(Filters.regex('^Done$'), done)]
     )
 
     dp.add_handler(conv_res_handler)
     dp.add_handler(conv_register_handler)
-
 
     # log all errors
     dp.add_error_handler(error)
@@ -49,99 +55,123 @@ def main():
     # start_polling() is non-blocking and will stop the bot gracefully.
     updater.idle()
 
-def menu_handler(update, context):
-    query = update.callback_query
-    query_option = str(query.data)
-    chat_id = query.message.chat.id
-
-    if query.data == 'normal_cars':
-        keyboard = [[telegram.InlineKeyboardButton("Volvo S40", callback_data='volvo_chosen'),
-                     telegram.InlineKeyboardButton("Hyundai Getz", callback_data='hyundai_chosen')],
-                    [telegram.InlineKeyboardButton("Opel Vectra C", callback_data='opel_chosen')]]
-        reply_markup = telegram.InlineKeyboardMarkup(keyboard)
-        query.edit_message_text("Here is a list of normal cars currently available for reservation:", reply_markup=reply_markup)
-    elif query.data == 'special_cars':
-        keyboard = [[telegram.InlineKeyboardButton("Volvo S40 with ramp", callback_data='volvo_special_chosen'),
-                     telegram.InlineKeyboardButton("Hyundai Getz with ramp", callback_data='hyundai_special_chosen')]]
-        reply_markup = telegram.InlineKeyboardMarkup(keyboard)
-        query.edit_message_text("Here is a list of special needs cars currently available for reservation:",
-                                reply_markup=reply_markup)
-    elif '_chosen' in query.data:
-        car = '-' + str(query.data).split('_')[0]
-        day1 = date.today().strftime("%d/%m/%Y")
-        day2 = date.today() + timedelta(days=1)
-        day3 = day2 + timedelta(days=1)
-        day5 = day3 + timedelta(days=2)
-
-        keyboard = [[telegram.InlineKeyboardButton(str(day1), callback_data='date_' + str(day1) + car),
-                     telegram.InlineKeyboardButton(str(day2.strftime("%d/%m/%Y")), callback_data='date_' + str(day2.strftime("%d/%m/%Y") + car)),
-                     telegram.InlineKeyboardButton(str(day3.strftime("%d/%m/%Y")), callback_data='date_' + str(day3.strftime("%d/%m/%Y") + car))],
-                    [telegram.InlineKeyboardButton(str(day5.strftime("%d/%m/%Y")), callback_data='date_' + str(day5.strftime("%d/%m/%Y") + car))]]
-        reply_markup = telegram.InlineKeyboardMarkup(keyboard)
-        query.edit_message_text("Please choose a date for your chosen car",
-                                reply_markup=reply_markup)
-    elif 'date_' in query.data:
-        car_and_date = '-' + str(query.data).split('_')[1]
-        keyboard = [[telegram.InlineKeyboardButton("AM", callback_data='AM_' + car_and_date),
-                     telegram.InlineKeyboardButton("PM", callback_data='PM_' + car_and_date)]]
-        reply_markup = telegram.InlineKeyboardMarkup(keyboard)
-        query.edit_message_text("Morning or evening?", reply_markup=reply_markup)
-
-    elif 'AM_' in query.data:
-        car_and_date = '-' + str(query.data).split('_')[1]
-        context.user_data['choice'] = 'time'
-        return TYPING_REPLY
-
 
 # Show a list of available commands to the user
 def help(update, context):
     update.message.reply_text(
-        "Dit is de Call-a-car bot\n"
-        "Bruikbare commando's zijn:\n "
-        "/start\n"
+        "This is the Call-a-car bot\n"
+        "Usable commands consist of:\n "
         "/help\n"
-        "/info\n"
+        "/register\n"
+        "/reserve\n"
+        "/reservations\n"
         "/account"
     )
 
 
-def register(update, context):
+def register(update: Update, _: CallbackContext) -> int:
     chat_id = update.message.chat.id
     result = DbHandler.check_user(chat_id)
     if not result:
-        DbHandler.create_new_user(chat_id, 'a', 'a')
-        update.message.reply_text("You have been registered")
+        update.message.reply_text("Please insert your phone number",
+                                  reply_markup=ReplyKeyboardRemove())
+        return PHONE_NUMBER
     else:
         update.message.reply_text("You are already registered")
 
 
-def user_register(update, context):
-    print("a")
-
+def register_phonenumber(update: Update, _: CallbackContext):
+    user = update.message.from_user
+    phone_number = update.message.text
+    chat_id = update.message.chat.id
+    DbHandler.create_new_user(chat_id, user.first_name, phone_number)
 
 def check_and_or_create_db(update, context):
-    DbHandler.check_if_db_exsists()
-
-def reserve_car(update, context):
-    chat_id = update.message.chat.id
-    result = DbHandler.check_user(chat_id)
-    if not result:
-        update.message.reply_text("Please register yourself with /register to start using this bot")
-    else:
-        keyboard = [[InlineKeyboardButton("Regular cars", callback_data='normal_cars'),
-                     InlineKeyboardButton("Cars with special needs", callback_data='special_cars')]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        update.message.reply_text('What kind of car would you like to reserve', reply_markup=reply_markup)
-
-def reservation_time(update, context):
-    update.message.reply_text("Geeft een tijd op")
-    return TYPING_REPLY
+    DbHandler.check_if_user_db_exsists()
 
 
-def reservation_place(update, context):
-    update.message.reply_text("Geeft een adres op")
-    return TYPING_REPLY
+def reserve_car(update: Update, _: CallbackContext) -> int:
+    reply_keyboard = [['Normal cars', 'Special needs cars']]
+    update.message.reply_text(
+        "What's the kind of car you need?",
+        reply_markup=ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=True),
+    )
+    return CAR
 
+
+def res_car_select(update: Update, _: CallbackContext) -> int:
+    selected_car = update.message.text
+    DbHandler.write_away_reservation(selected_car + "-")
+    reply_keyboard = [['Volvo', 'Audi', 'Bmw']]
+
+    update.message.reply_text(
+        "Here's a list of cars that are available:",
+        reply_markup=ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=True),
+    )
+    return ADDRESS_FROM
+
+
+def res_address_from_select(update: Update, _: CallbackContext) -> int:
+    DbHandler.write_away_reservation(update.message.text + "-")
+    update.message.reply_text("Specify pickup location \n"
+                              "Please use this format: {Street} {Building/Apartment} {Postal code} {Town} {Country}",
+                              reply_markup=ReplyKeyboardRemove())
+    return ADDRESS_TO
+
+
+def res_address_to_select(update: Update, _: CallbackContext) -> int:
+    DbHandler.write_away_reservation(update.message.text + "-")
+    update.message.reply_text("Specify droposs location \n"
+                              "Please use this format: {Street} {Building/Apartment} {Postal code} {Town} {Country}",
+                              reply_markup=ReplyKeyboardRemove())
+    return TIME
+
+
+def res_time_select(update: Update, _: CallbackContext) -> int:
+    DbHandler.write_away_reservation(update.message.text + "-")
+    reply_keyboard = [['8:00', '9:00', '11:30'], ['13:00', '15:00', '16:00'], ['18:30', '20:30', '21:00']]
+
+    update.message.reply_text(
+        "Here's a list of time slots that are available:",
+        reply_markup=ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=True),
+    )
+    return DATE
+
+
+def res_date_select(update: Update, _: CallbackContext) -> int:
+    selected_car = update.message.text
+    DbHandler.write_away_reservation(selected_car + "-")
+
+    update.message.reply_text(
+        "Choose a date for your reservation:",
+        reply_markup=telegramcalendar.create_calendar(),
+    )
+    return DATE_SELECT
+
+
+def inline_handler(update: Update, _: CallbackContext):
+    selected, date = telegramcalendar.process_calendar_selection(bot, update)
+
+    if selected:
+        bot.send_message(chat_id=update.callback_query.from_user.id,
+                        text="You selected %s" % (date.strftime("%d/%m/%Y") + "\n" + "To finish your reservation user /finish"),
+                        reply_markup=ReplyKeyboardRemove())
+    DbHandler.write_away_reservation(date.strftime("%d/%m/%Y") + "-")
+
+
+def res_finish(update: Update, _: CallbackContext):
+    DbHandler.create_new_reservation(update.message.chat.id)
+    bot.send_message(update.message.chat.id, "Reservation succesfull to see your reservations use /reservations")
+
+
+def get_reservation(update: Update, _: CallbackContext):
+    user = update.message.from_user
+    print(user)
+    message_list = DbHandler.get_reservation(update.message.chat.id)
+    reservations = ""
+    for message in message_list:
+        reservations += message + '\n\n'
+    bot.send_message(update.message.chat.id, reservations)
 
 def done():
     return ConversationHandler.END
